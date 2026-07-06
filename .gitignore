@@ -1,0 +1,7 @@
+.env
+.env.example
+data/*.db
+__pycache__/
+*.pyc
+venv/
+*.service
