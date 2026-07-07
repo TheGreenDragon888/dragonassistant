@@ -82,9 +82,29 @@ class SetupCog(commands.Cog):
             ephemeral=True,
         )
 
+    @setup_group.command(name="max_queue", description="Set the maximum queued items per user for furnace or factory")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(infrastructure="Which infrastructure to set a queue limit for", amount="Maximum queued items per user (1-50)")
+    @app_commands.choices(infrastructure=[
+        app_commands.Choice(name="furnace", value="furnace"),
+        app_commands.Choice(name="factory", value="factory"),
+    ])
+    async def setup_max_queue(self, interaction: discord.Interaction, infrastructure: app_commands.Choice[str], amount: app_commands.Range[int, 1, 50]):
+        await self._ensure_server_row(interaction.guild_id)
+        column = "furnace_max_queue" if infrastructure.value == "furnace" else "factory_max_queue"
+        await self.db.execute(
+            f"UPDATE server_config SET {column} = ? WHERE guild_id = ?",
+            (amount, interaction.guild_id),
+        )
+        await interaction.response.send_message(
+            f"✅ {infrastructure.value.title()} max queue set to **{amount}** items per user.",
+            ephemeral=True,
+        )
+
     @setup_mine.error
     @setup_currency.error
     @setup_fee.error
+    @setup_max_queue.error
     async def setup_error_handler(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         # Fires when a non-admin tries to run a /setup command.
         if isinstance(error, app_commands.MissingPermissions):

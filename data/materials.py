@@ -11,20 +11,20 @@ restarting the bot, not something users modify.
 # item from a "mining block". Chances are expressed as fractions of 1.0 and
 # should sum to 1.0.
 RAW_MATERIALS = {
-    "iron_ore":    {"name": "Iron Ore",    "emoji": "<:IronOre:1523432328028885034>",    "drop_chance": 0.50},
-    "copper_ore":  {"name": "Copper Ore",  "emoji": "<:CopperOre:1523432342813933699>",  "drop_chance": 0.30},
-    "coal":        {"name": "Coal",        "emoji": "<:Coal:1523432352318099456>",       "drop_chance": 0.0999},
-    "ruby":        {"name": "Ruby",        "emoji": "<:Ruby:1523433101840089208>",       "drop_chance": 0.000066},
-    "obsidian":    {"name": "Obsidian",    "emoji": "<:Obsidian:1523433115450736690>",   "drop_chance": 0.000033},
-    "diamond":     {"name": "Diamond",     "emoji": "<:Diamond:1523433355708858612>",    "drop_chance": 0.000001},
+    "iron_ore":    {"name": "Iron Ore",    "emoji": "<:IronOre:1523432328028885034>",    "drop_chance": 0.50,     "dc_value": 0.01},
+    "copper_ore":  {"name": "Copper Ore",  "emoji": "<:CopperOre:1523432342813933699>",  "drop_chance": 0.30,     "dc_value": 0.0167},
+    "coal":        {"name": "Coal",        "emoji": "<:Coal:1523432352318099456>",       "drop_chance": 0.0999,   "dc_value": 0.05},
+    "ruby":        {"name": "Ruby",        "emoji": "<:Ruby:1523433101840089208>",       "drop_chance": 0.00009,  "dc_value": 5500.00}, # est value. 5,5555.555...
+    "obsidian":    {"name": "Obsidian",    "emoji": "<:Obsidian:1523433115450736690>",   "drop_chance": 0.000009, "dc_value": 52500.00}, # est value. 55,5555.555...
+    "diamond":     {"name": "Diamond",     "emoji": "<:Diamond:1523433355708858612>",    "drop_chance": 0.000001, "dc_value": 500000.00},
 }
 
 # Smelted materials: produced by the furnace from raw materials.
 # "inputs" maps material_id -> quantity required to produce ONE output unit.
-SMELTED_MATERIALS = {
-    "iron":  {"name": "Iron",  "emoji": "<:Iron:1523433412805918820>",  "inputs": {"iron_ore": 10}},
-    "copper": {"name": "Copper", "emoji": "<:Copper:1523433425220927498>", "inputs": {"copper_ore": 10}},
-    "steel": {"name": "Steel", "emoji": "<:Steel:1523433463150149692>", "inputs": {"iron_ore": 20, "coal": 4}},
+SMELTED_MATERIALS = { # Smelting a material increases its value of all its raw materials by 50%
+    "iron":  {"name": "Iron",  "emoji": "<:Iron:1523433412805918820>",  "inputs": {"iron_ore": 10}, "dc_value": 0.15}, #raw: 0.1
+    "copper": {"name": "Copper", "emoji": "<:Copper:1523433425220927498>", "inputs": {"copper_ore": 10}, "dc_value": 0.25}, #raw: 0.167
+    "steel": {"name": "Steel", "emoji": "<:Steel:1523433463150149692>", "inputs": {"iron_ore": 20, "coal": 4}, "dc_value": 0.60}, #raw: 0.4
 }
 
 # Component materials: produced by the factory from smelted materials.
@@ -70,7 +70,7 @@ DRILLS = {
 
 # Furnace/factory throughput per level, in items-per-hour, straight from the doc.
 FURNACE_RATES = {1: 5, 2: 10, 3: 15}
-FACTORY_RATES = {1: 5, 2: 10, 3: 15}
+FACTORY_RATES = {1: 1, 2: 2, 3: 3}
 
 # Fee totals (in server currency) required to level up infrastructure.
 FURNACE_FACTORY_UPGRADE_THRESHOLDS = {2: 5.00, 3: 50.00}
@@ -78,6 +78,9 @@ FURNACE_FACTORY_UPGRADE_THRESHOLDS = {2: 5.00, 3: 50.00}
 MAX_DRILLS_PER_USER_PER_CHANNEL = 3
 MAX_MINING_BLOCKS_PER_CHANNEL = 3
 ITEMS_PER_MINING_BLOCK_PER_MEMBER = 200
+FURNACE_MAX_QUEUE_ITEMS = 25
+FACTORY_MAX_QUEUE_ITEMS = 5
+MAX_QUEUE_PER_USER = 5
 
 # 1% of a day = 14.4 minutes = 864 seconds. Every window, 0.10 of the
 # server's currency is split among everyone who chatted during it.
@@ -88,7 +91,7 @@ CHAT_WINDOW_PAYOUT = 0.10
 def get_material_info(material_id: str) -> dict | None:
     """Looks up a material regardless of which tier (raw/smelted/component)
     it belongs to. Returns None if the ID doesn't exist."""
-    for table in (RAW_MATERIALS, SMELTED_MATERIALS, COMPONENT_MATERIALS):
+    for table in (RAW_MATERIALS, SMELTED_MATERIALS, COMPONENT_MATERIALS, DRILLS):
         if material_id in table:
             return table[material_id]
     return None

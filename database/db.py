@@ -39,6 +39,23 @@ class Database:
         with self._connect() as conn:
             conn.executescript(schema_path.read_text())
 
+            existing_columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(server_config)").fetchall()
+            }
+            if "furnace_max_queue" not in existing_columns:
+                conn.execute(
+                    "ALTER TABLE server_config ADD COLUMN furnace_max_queue INTEGER NOT NULL DEFAULT 25"
+                )
+            if "factory_max_queue" not in existing_columns:
+                conn.execute(
+                    "ALTER TABLE server_config ADD COLUMN factory_max_queue INTEGER NOT NULL DEFAULT 5"
+                )
+
+            conn.execute(
+                "UPDATE server_config SET furnace_max_queue = 25 WHERE furnace_max_queue IS NULL OR furnace_max_queue = 5"
+            )
+
     async def init_schema(self):
         """Creates all tables from schema.sql if they don't already exist.
         Call this once, right after the bot logs in."""

@@ -3,5 +3,6 @@
 data/*.db
 __pycache__/
 *.pyc
+.venv/
 venv/
 *.service

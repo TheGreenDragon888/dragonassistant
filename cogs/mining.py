@@ -25,9 +25,20 @@ from data.materials import (
     MAX_DRILLS_PER_USER_PER_CHANNEL,
     MAX_MINING_BLOCKS_PER_CHANNEL,
     ITEMS_PER_MINING_BLOCK_PER_MEMBER,
+    get_material_info,
 )
 
-HARVEST_TICK_MINUTES = 5
+HARVEST_TICK_MINUTES = 12
+
+
+def build_material_breakdown(total_items: int, roll_material=None) -> dict[str, int]:
+    if total_items <= 0:
+        return {}
+    breakdown: dict[str, int] = {}
+    for _ in range(total_items):
+        material_id = roll_material() if roll_material is not None else next(iter(RAW_MATERIALS))
+        breakdown[material_id] = breakdown.get(material_id, 0) + 1
+    return breakdown
 
 
 class MiningCog(commands.Cog):
@@ -43,11 +54,59 @@ class MiningCog(commands.Cog):
 
     mine_group = app_commands.Group(name="mine", description="Manage mining drills")
 
+    async def _ensure_user_row(self, user_id: int):
+        await self.db.execute(
+            "INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,)
+        )
+
+    async def _get_quantity(self, user_id: int, material_id: str) -> int:
+        row = await self.db.fetchone(
+            "SELECT quantity FROM user_materials WHERE user_id = ? AND material_id = ?",
+            (user_id, material_id),
+        )
+        return row["quantity"] if row else 0
+
+    async def _adjust_quantity(self, user_id: int, material_id: str, delta: int):
+        await self.db.execute(
+            """
+            INSERT INTO user_materials (user_id, material_id, quantity) VALUES (?, ?, ?)
+            ON CONFLICT (user_id, material_id) DO UPDATE SET quantity = quantity + excluded.quantity
+            """,
+            (user_id, material_id, delta),
+        )
+
+    def _roll_raw_material(self) -> str:
+        roll = random.random()
+        cumulative = 0.0
+        for mat_id, info in RAW_MATERIALS.items():
+            cumulative += info["drop_chance"]
+            if roll <= cumulative:
+                return mat_id
+        return next(iter(RAW_MATERIALS))
+
     async def _get_dig_site_channel(self, guild_id: int) -> int | None:
         row = await self.db.fetchone(
             "SELECT mine_channel_id FROM server_config WHERE guild_id = ?", (guild_id,)
         )
         return row["mine_channel_id"] if row else None
+
+    async def _ensure_player_has_any_drill(self, user_id: int) -> bool:
+        """If a player has no drills in inventory or placed in any server, give them an iron drill."""
+        await self._ensure_user_row(user_id)
+
+        for drill_id in DRILLS:
+            if await self._get_quantity(user_id, drill_id) > 0:
+                return False
+
+        placed_count = await self.db.fetchone(
+            "SELECT COUNT(*) AS cnt FROM drills WHERE owner_id = ?",
+            (user_id,),
+        )
+        if placed_count and placed_count["cnt"] > 0:
+            return False
+
+        await self._adjust_quantity(user_id, "iron_drill", 1)
+        return True
 
     @mine_group.command(name="place", description="Place a drill in this dig site channel")
     @app_commands.describe(drill_type="Which drill to place")
@@ -73,16 +132,29 @@ class MiningCog(commands.Cog):
             )
             return
 
-        # TODO: this scaffold does not yet deduct the drill item from the
-        # user's inventory - that requires the factory to actually be able
-        # to craft drills first (see cogs/factory.py TODOs).
+        fallback_granted = await self._ensure_player_has_any_drill(interaction.user.id)
+        have = await self._get_quantity(interaction.user.id, drill_type.value)
+        if have < 1:
+            if drill_type.value != "iron_drill" or not fallback_granted:
+                await interaction.response.send_message(
+                    f"You need one **{DRILLS[drill_type.value]['name']}** in your inventory before you can place it.",
+                    ephemeral=True,
+                )
+                return
+
+        await self._adjust_quantity(interaction.user.id, drill_type.value, -1)
         await self.db.execute(
             "INSERT INTO drills (guild_id, channel_id, owner_id, drill_type) VALUES (?, ?, ?, ?)",
             (interaction.guild_id, interaction.channel_id, interaction.user.id, drill_type.value),
         )
-        await interaction.response.send_message(
-            f"⛏️ Placed a **{drill_type.name}** in this dig site."
-        )
+        if fallback_granted:
+            await interaction.response.send_message(
+                f"⛏️ You didn't have any drills, so I gave you an **Iron Drill** and placed it in this dig site."
+            )
+        else:
+            await interaction.response.send_message(
+                f"⛏️ Placed a **{drill_type.name}** in this dig site."
+            )
 
     @mine_group.command(name="status", description="Show active drills and mining block progress in this channel")
     async def mine_status(self, interaction: discord.Interaction):
@@ -111,42 +183,101 @@ class MiningCog(commands.Cog):
         else:
             oldest = blocks[0]
             embed.add_field(
-                name=f"Oldest Mining Block (#{oldest['block_id']})",
+                name=f"<:MiningBlock:1523436645729173514> Oldest Mining Block (#{oldest['block_id']})",
                 value=f"{oldest['remaining_total']} raw materials remaining ({len(blocks)}/{MAX_MINING_BLOCKS_PER_CHANNEL} blocks queued)",
                 inline=False,
             )
 
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="collect", description="Collect materials from your full drill(s) in this channel")
+    @mine_group.command(name="remove", description="Remove a drill of a specific type and collect its items")
+    @app_commands.describe(drill_type="Which drill type to remove")
+    @app_commands.choices(drill_type=[
+        app_commands.Choice(name=info["name"], value=key) for key, info in DRILLS.items()
+    ])
+    async def mine_remove(self, interaction: discord.Interaction, drill_type: app_commands.Choice[str]):
+        # Find the drill of this type with the lowest stored_amount
+        drill = await self.db.fetchone(
+            "SELECT * FROM drills WHERE guild_id = ? AND channel_id = ? AND owner_id = ? AND drill_type = ? ORDER BY stored_amount ASC LIMIT 1",
+            (interaction.guild_id, interaction.channel_id, interaction.user.id, drill_type.value),
+        )
+        if drill is None:
+            await interaction.response.send_message(
+                f"You don't have any **{drill_type.name}** drills here to remove.", ephemeral=True
+            )
+            return
+
+        await self._ensure_user_row(interaction.user.id)
+
+        # Collect items from this drill
+        collected_breakdown = build_material_breakdown(drill["stored_amount"], self._roll_raw_material)
+        for material_id, qty in collected_breakdown.items():
+            await self._adjust_quantity(interaction.user.id, material_id, qty)
+
+        # Refund the drill item to inventory
+        await self._adjust_quantity(interaction.user.id, drill["drill_type"], 1)
+        
+        # Remove the drill
+        await self.db.execute("DELETE FROM drills WHERE drill_id = ?", (drill["drill_id"],))
+        
+        # Build response embed
+        embed = discord.Embed(title=f"Drill Removed", color=discord.Color.blurple())
+        embed.add_field(name="Drill", value=f"{DRILLS[drill['drill_type']]['emoji']} Refunded to inventory", inline=False)
+        
+        if collected_breakdown:
+            lines = []
+            for mat_id, qty in sorted(collected_breakdown.items()):
+                info = get_material_info(mat_id)
+                if info:
+                    lines.append(f"{info['emoji']} {qty}x {info['name']}")
+            embed.add_field(name="Items Collected", value="\n".join(lines), inline=False)
+        else:
+            embed.add_field(name="Items Collected", value="None", inline=False)
+        
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="collect", description="Collect materials from your drill(s) in this channel")
     async def collect(self, interaction: discord.Interaction):
         drills = await self.db.fetchall(
-            "SELECT * FROM drills WHERE guild_id = ? AND channel_id = ? AND owner_id = ? AND is_full = 1",
+            "SELECT * FROM drills WHERE guild_id = ? AND channel_id = ? AND owner_id = ? AND stored_amount > 0",
             (interaction.guild_id, interaction.channel_id, interaction.user.id),
         )
         if not drills:
-            await interaction.response.send_message("You have no full drills here to collect from.", ephemeral=True)
+            await interaction.response.send_message("You have no drills with materials to collect here.", ephemeral=True)
             return
 
-        # NOTE: this scaffold's harvest loop already rolled which raw
-        # material each stored unit is (tracked as generic "stored_amount"
-        # for simplicity). A full implementation would track per-material
-        # breakdown per drill; left as a TODO for you to extend.
-        await self.db.execute(
-            "INSERT INTO users (user_id) VALUES (?) ON CONFLICT (user_id) DO NOTHING",
-            (interaction.user.id,),
-        )
+        await self._ensure_user_row(interaction.user.id)
 
+        collected_breakdown = {}
         total_collected = 0
         for d in drills:
             total_collected += d["stored_amount"]
+            drill_breakdown = build_material_breakdown(d["stored_amount"], self._roll_raw_material)
+            for material_id, qty in drill_breakdown.items():
+                collected_breakdown[material_id] = collected_breakdown.get(material_id, 0) + qty
             await self.db.execute(
                 "UPDATE drills SET stored_amount = 0, is_full = 0 WHERE drill_id = ?",
                 (d["drill_id"],),
             )
-        await interaction.response.send_message(
-            f"📦 Collected {total_collected} raw materials from {len(drills)} drill(s)."
-        )
+
+        for material_id, qty in collected_breakdown.items():
+            await self._adjust_quantity(interaction.user.id, material_id, qty)
+
+        # Build response embed
+        embed = discord.Embed(title=f"Collection Complete", color=discord.Color.gold())
+        embed.description = f"📦 Collected **{total_collected}** raw materials from **{len(drills)}** drill(s)"
+        
+        lines = []
+        for mat_id in sorted(collected_breakdown.keys()):
+            qty = collected_breakdown[mat_id]
+            info = get_material_info(mat_id)
+            if info:
+                lines.append(f"{info['emoji']} {qty}x {info['name']}")
+        
+        if lines:
+            embed.add_field(name="Materials", value="\n".join(lines), inline=False)
+        
+        await interaction.response.send_message(embed=embed)
 
     @tasks.loop(hours=24)
     async def daily_block_loop(self):
@@ -228,6 +359,15 @@ class MiningCog(commands.Cog):
                 "UPDATE mining_blocks SET remaining_total = remaining_total - ? WHERE block_id = ?",
                 (harvested, oldest_block["block_id"]),
             )
+            
+            # Clean up mining block if it's depleted
+            updated_block = await self.db.fetchone(
+                "SELECT remaining_total FROM mining_blocks WHERE block_id = ?",
+                (oldest_block["block_id"],),
+            )
+            if updated_block and updated_block["remaining_total"] <= 0:
+                await self.db.execute("DELETE FROM mining_block_contents WHERE block_id = ?", (oldest_block["block_id"],))
+                await self.db.execute("DELETE FROM mining_blocks WHERE block_id = ?", (oldest_block["block_id"],))
 
     @harvest_loop.before_loop
     async def before_harvest_loop(self):

@@ -34,7 +34,9 @@ CREATE TABLE IF NOT EXISTS server_config (
     furnace_fee         REAL NOT NULL DEFAULT 0.0,
     factory_fee         REAL NOT NULL DEFAULT 0.0,
     furnace_fees_collected REAL NOT NULL DEFAULT 0.0,
-    factory_fees_collected REAL NOT NULL DEFAULT 0.0
+    factory_fees_collected REAL NOT NULL DEFAULT 0.0,
+    furnace_max_queue   INTEGER NOT NULL DEFAULT 25,
+    factory_max_queue   INTEGER NOT NULL DEFAULT 5
 );
 
 -- A user's balance of ONE specific server's custom currency. Unlike
