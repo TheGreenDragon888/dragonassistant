@@ -102,6 +102,21 @@ class FurnaceCog(commands.Cog):
             message += f"\nThis request will consume **{fee_total:.2f}** from your wallet as items are produced."
         await interaction.response.send_message(message)
 
+    def _build_available_products_field(self, recipes: dict) -> str:
+        lines = []
+        for material_id, recipe in recipes.items():
+            info = get_material_info(material_id)
+            emoji = info["emoji"] if info else "❓"
+            name = info["name"] if info else material_id
+            costs = []
+            for input_id, qty in recipe.get("inputs", {}).items():
+                input_info = get_material_info(input_id)
+                input_emoji = input_info["emoji"] if input_info else "❓"
+                input_name = input_info["name"] if input_info else input_id
+                costs.append(f"{input_emoji} {qty}x {input_name}")
+            lines.append(f"{emoji} {name} — {' + '.join(costs)}")
+        return "\n".join(lines)
+
     async def _furnace_status_impl(self, interaction: discord.Interaction):
         cfg = await self.db.fetchone(
             "SELECT furnace_level, furnace_fee, furnace_fees_collected, furnace_max_queue FROM server_config WHERE guild_id = ?",
@@ -150,6 +165,12 @@ class FurnaceCog(commands.Cog):
             if len(jobs) > 10:
                 lines.append(f"... and {len(jobs) - 10} more")
             embed.add_field(name="Pending Jobs", value="\n".join(lines), inline=False)
+
+        embed.add_field(
+            name="Available Products",
+            value=self._build_available_products_field(SMELTED_MATERIALS),
+            inline=False,
+        )
 
         await interaction.response.send_message(embed=embed)
 
