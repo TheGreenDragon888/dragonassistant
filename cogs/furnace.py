@@ -12,6 +12,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from utils.embeds import add_multi_field
+
 from data.materials import (
     SMELTED_MATERIALS,
     FURNACE_MAX_QUEUE_ITEMS,
@@ -102,7 +104,7 @@ class FurnaceCog(commands.Cog):
             message += f"\nThis request will consume **{fee_total:.2f}** from your wallet as items are produced."
         await interaction.response.send_message(message)
 
-    def _build_available_products_field(self, recipes: dict) -> str:
+    def _build_available_products_lines(self, recipes: dict) -> list[str]:
         lines = []
         for material_id, recipe in recipes.items():
             info = get_material_info(material_id)
@@ -114,7 +116,7 @@ class FurnaceCog(commands.Cog):
                 input_emoji = input_info["emoji"] if input_info else "❓"
                 costs.append(f"{input_emoji} {qty}")
             lines.append(f"{emoji} {name} - {' , '.join(costs)}")
-        return "\n".join(lines)
+        return lines
 
     async def _furnace_status_impl(self, interaction: discord.Interaction):
         cfg = await self.db.fetchone(
@@ -163,9 +165,9 @@ class FurnaceCog(commands.Cog):
                 lines.append(f"{emoji} {job['quantity']}x {name} - {status_str}")
             if len(jobs) > 10:
                 lines.append(f"... and {len(jobs) - 10} more")
-            embed.add_field(name="Pending Jobs", value="\n".join(lines), inline=False)
+            add_multi_field(embed, "Pending Jobs", lines)
 
-        embed.add_field(name="Recipes", value=self._build_available_products_field(SMELTED_MATERIALS), inline=False)
+        add_multi_field(embed, "Recipes", self._build_available_products_lines(SMELTED_MATERIALS))
 
         await interaction.response.send_message(embed=embed)
 
