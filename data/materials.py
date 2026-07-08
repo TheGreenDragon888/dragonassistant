@@ -49,22 +49,22 @@ DRILLS = {
     "steel_drill": {
         "name": "Steel Drill", "emoji": "<:SteelMiningDrill:1523433646613069824>",
         "inputs": {"wiring": 1, "drill_chassis": 1, "steel_drill_bit": 1},
-        "mines_per_hour": 10, "storage_capacity": 200,
+        "mines_per_hour": 7.5, "storage_capacity": 200,
     },
     "ruby_drill": {
         "name": "Ruby Drill", "emoji": "<:RubyMiningDrill:1523433666800517262>",
         "inputs": {"wiring": 1, "drill_chassis": 1, "ruby_drill_bit": 1},
-        "mines_per_hour": 15, "storage_capacity": 350,
+        "mines_per_hour": 10, "storage_capacity": 350,
     },
     "obsidian_drill": {
         "name": "Obsidian Drill", "emoji": "<:ObsidianMiningDrill:1523433678825459893>",
         "inputs": {"wiring": 1, "drill_chassis": 1, "obsidian_drill_bit": 1},
-        "mines_per_hour": 20, "storage_capacity": 500,
+        "mines_per_hour": 12.5, "storage_capacity": 500,
     },
     "diamond_drill": {
         "name": "Diamond Drill", "emoji": "<:DiamondMiningDrill:1523433688656908408>",
         "inputs": {"wiring": 1, "drill_chassis": 1, "diamond_drill_bit": 1},
-        "mines_per_hour": 25, "storage_capacity": 750,
+        "mines_per_hour": 15, "storage_capacity": 750,
     },
 }
 

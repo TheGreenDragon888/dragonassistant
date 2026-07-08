@@ -173,7 +173,7 @@ class EconomyCog(commands.Cog):
             balance_parts.append(f"{row['currency_emoji'] or '💰'} {row['balance']:.2f}")
         if not currency_rows:
             balance_parts.append("💰 0.00")
-        embed.description = " • ".join(balance_parts)
+        embed.description = " ".join(balance_parts)
 
         inventory_lines = []
         for row in inventory_rows:

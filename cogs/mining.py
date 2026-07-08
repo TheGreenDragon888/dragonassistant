@@ -28,7 +28,7 @@ from data.materials import (
     get_material_info,
 )
 
-HARVEST_TICK_MINUTES = 12
+HARVEST_TICK_MINUTES = 24 # 12
 
 
 def build_material_breakdown(total_items: int, roll_material=None) -> dict[str, int]:

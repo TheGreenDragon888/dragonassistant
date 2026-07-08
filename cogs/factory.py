@@ -113,9 +113,8 @@ class FactoryCog(commands.Cog):
             for input_id, qty in recipe.get("inputs", {}).items():
                 input_info = get_material_info(input_id)
                 input_emoji = input_info["emoji"] if input_info else "❓"
-                input_name = input_info["name"] if input_info else input_id
-                costs.append(f"{input_emoji} {qty}x {input_name}")
-            lines.append(f"{emoji} {name} — {' + '.join(costs)}")
+                costs.append(f"{input_emoji} {qty}")
+            lines.append(f"{emoji} {name} - {' , '.join(costs)}")
         return "\n".join(lines)
 
     async def _factory_status_impl(self, interaction: discord.Interaction):
@@ -167,11 +166,7 @@ class FactoryCog(commands.Cog):
                 lines.append(f"... and {len(jobs) - 10} more")
             embed.add_field(name="Pending Jobs", value="\n".join(lines), inline=False)
 
-        embed.add_field(
-            name="Available Products",
-            value=self._build_available_products_field(CRAFTABLE),
-            inline=False,
-        )
+        embed.add_field(name="Recipes", value=self._build_available_products_field(CRAFTABLE), inline=False)
 
         await interaction.response.send_message(embed=embed)
 
