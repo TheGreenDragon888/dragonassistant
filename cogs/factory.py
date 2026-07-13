@@ -56,6 +56,13 @@ class FactoryCog(commands.Cog):
             (user_id, material_id, delta),
         )
 
+    async def _get_server_balance(self, guild_id: int, user_id: int) -> float:
+        row = await self.db.fetchone(
+            "SELECT balance FROM server_currency_balances WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        )
+        return row["balance"] if row else 0.0
+
     @factory_group.command(name="craft", description="Queue a component or drill to be crafted")
     @app_commands.describe(item="What to craft", quantity="How many to produce")
     @app_commands.choices(item=[
@@ -92,17 +99,36 @@ class FactoryCog(commands.Cog):
             )
             return
 
+        # Fee is charged UP FRONT now (previously it was charged per-item as
+        # the job completed) — so check affordability before touching inventory.
+        fee_total = fee_rate * quantity
+        if fee_total > 0:
+            balance = await self._get_server_balance(interaction.guild_id, interaction.user.id)
+            if balance < fee_total:
+                await interaction.response.send_message(
+                    f"This would cost **{fee_total:.2f}** currency up front, but you only have **{balance:.2f}**.",
+                    ephemeral=True,
+                )
+                return
+
         for input_id, per_unit in recipe["inputs"].items():
             await self._adjust_quantity(interaction.user.id, input_id, -per_unit * quantity)
+
+        if fee_total > 0:
+            await self._charge_user_fee(interaction.guild_id, interaction.user.id, fee_total)
+            await self.db.execute(
+                "UPDATE server_config SET factory_fees_collected = factory_fees_collected + ? WHERE guild_id = ?",
+                (fee_total, interaction.guild_id),
+            )
+            await self._maybe_upgrade_factory(interaction.guild_id)
 
         await self.db.execute(
             "INSERT INTO production_jobs (guild_id, user_id, job_type, target_id, quantity) VALUES (?, ?, 'factory', ?, ?)",
             (interaction.guild_id, interaction.user.id, item.value, quantity),
         )
         message = f"🏭 Queued {quantity}x **{recipe['name']}** for crafting."
-        if fee_rate > 0:
-            fee_total = fee_rate * quantity
-            message += f"\nThis request will consume **{fee_total:.2f}** from your wallet as items are produced."
+        if fee_total > 0:
+            message += f"\n**{fee_total:.2f}** currency has been charged up front."
         await interaction.response.send_message(message)
 
     def _build_available_products_lines(self, recipes: dict) -> list[str]:

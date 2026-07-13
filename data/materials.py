@@ -75,6 +75,7 @@ FACTORY_RATES = {1: 1, 2: 2, 3: 3}
 # Fee totals (in server currency) required to level up infrastructure.
 FURNACE_FACTORY_UPGRADE_THRESHOLDS = {2: 5.00, 3: 50.00}
 
+FURNACE_COAL_COST_PER_UNIT = 1  # extra coal burned per item smelted, on top of the recipe's own inputs
 MAX_DRILLS_PER_USER_PER_CHANNEL = 3
 MAX_MINING_BLOCKS_PER_CHANNEL = 3
 ITEMS_PER_MINING_BLOCK_PER_MEMBER = 200

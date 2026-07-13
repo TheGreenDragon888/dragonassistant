@@ -20,6 +20,7 @@ from data.materials import (
     FURNACE_RATES,
     FURNACE_FACTORY_UPGRADE_THRESHOLDS,
     get_material_info,
+    FURNACE_COAL_COST_PER_UNIT
 )
 
 PROCESS_TICK_MINUTES = 5
@@ -53,6 +54,14 @@ class FurnaceCog(commands.Cog):
             (user_id, material_id, delta),
         )
 
+    async def _get_server_balance(self, guild_id: int, user_id: int) -> float:
+        row = await self.db.fetchone(
+            "SELECT balance FROM server_currency_balances WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        )
+        return row["balance"] if row else 0.0
+
+
     @furnace_group.command(name="smelt", description="Queue raw materials to be smelted")
     @app_commands.describe(material="What to smelt", quantity="How many to produce")
     @app_commands.choices(material=[
@@ -61,9 +70,15 @@ class FurnaceCog(commands.Cog):
     async def furnace_smelt(self, interaction: discord.Interaction, material: app_commands.Choice[str], quantity: app_commands.Range[int, 1, 1000]):
         recipe = SMELTED_MATERIALS[material.value]
 
-        # Check the user has enough of every required raw material.
+        # Total material cost = the recipe's own inputs + a flat per-item coal
+        # cost to run the furnace at all (combined with any coal the recipe
+        # itself already needs, e.g. steel's 4 coal per unit).
+        needs: dict[str, int] = {}
         for input_id, per_unit in recipe["inputs"].items():
-            needed = per_unit * quantity
+            needs[input_id] = needs.get(input_id, 0) + per_unit * quantity
+        needs["coal"] = needs.get("coal", 0) + FURNACE_COAL_COST_PER_UNIT * quantity
+
+        for input_id, needed in needs.items():
             have = await self._get_quantity(interaction.user.id, input_id)
             if have < needed:
                 await interaction.response.send_message(
@@ -71,7 +86,6 @@ class FurnaceCog(commands.Cog):
                 )
                 return
 
-        # Check max queue limit based on total queued output units.
         cfg = await self.db.fetchone(
             "SELECT furnace_fee, furnace_max_queue FROM server_config WHERE guild_id = ?",
             (interaction.guild_id,),
@@ -90,18 +104,37 @@ class FurnaceCog(commands.Cog):
             )
             return
 
-        # Deduct inputs up front so they can't be double-spent while queued.
-        for input_id, per_unit in recipe["inputs"].items():
-            await self._adjust_quantity(interaction.user.id, input_id, -per_unit * quantity)
+        # Fee is charged UP FRONT now (previously it was charged per-item as
+        # the job completed) — so check affordability before touching inventory.
+        fee_total = fee_rate * quantity
+        if fee_total > 0:
+            balance = await self._get_server_balance(interaction.guild_id, interaction.user.id)
+            if balance < fee_total:
+                await interaction.response.send_message(
+                    f"This would cost **{fee_total:.2f}** currency up front, but you only have **{balance:.2f}**.",
+                    ephemeral=True,
+                )
+                return
+
+        for input_id, needed in needs.items():
+            await self._adjust_quantity(interaction.user.id, input_id, -needed)
+
+        if fee_total > 0:
+            await self._charge_user_fee(interaction.guild_id, interaction.user.id, fee_total)
+            await self.db.execute(
+                "UPDATE server_config SET furnace_fees_collected = furnace_fees_collected + ? WHERE guild_id = ?",
+                (fee_total, interaction.guild_id),
+            )
+            await self._maybe_upgrade_furnace(interaction.guild_id)
 
         await self.db.execute(
             "INSERT INTO production_jobs (guild_id, user_id, job_type, target_id, quantity) VALUES (?, ?, 'furnace', ?, ?)",
             (interaction.guild_id, interaction.user.id, material.value, quantity),
         )
-        message = f"🔥 Queued {quantity}x **{recipe['name']}** for smelting."
-        if fee_rate > 0:
-            fee_total = fee_rate * quantity
-            message += f"\nThis request will consume **{fee_total:.2f}** from your wallet as items are produced."
+
+        message = f"🔥 Queued {quantity}x **{recipe['name']}** for smelting (burning {FURNACE_COAL_COST_PER_UNIT * quantity} extra coal to run the furnace)."
+        if fee_total > 0:
+            message += f"\n**{fee_total:.2f}** currency has been charged up front."
         await interaction.response.send_message(message)
 
     def _build_available_products_lines(self, recipes: dict) -> list[str]:
@@ -214,15 +247,7 @@ class FurnaceCog(commands.Cog):
                 # Credit the produced items to the user.
                 await self._adjust_quantity(job["user_id"], job["target_id"], produced)
 
-                # Collect the fee (if any) for the produced items.
-                if cfg["furnace_fee"] > 0:
-                    fee_total = cfg["furnace_fee"] * produced
-                    await self.db.execute(
-                        "UPDATE server_config SET furnace_fees_collected = furnace_fees_collected + ? WHERE guild_id = ?",
-                        (fee_total, cfg["guild_id"]),
-                    )
-                    await self._charge_user_fee(cfg["guild_id"], job["user_id"], fee_total)
-                    await self._maybe_upgrade_furnace(cfg["guild_id"])
+                # (fee charging removed here — it now happens in furnace_smelt, up front)
 
                 if new_quantity <= 0:
                     await self.db.execute(
