@@ -11,6 +11,8 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from utils.embeds import add_multi_field
+from utils.responses import respond
+from utils.formatting import format_currency
 
 from data.materials import (
     COMPONENT_MATERIALS,
@@ -82,10 +84,11 @@ class FactoryCog(commands.Cog):
 
         # Check max queue limit based on total queued output units.
         cfg = await self.db.fetchone(
-            "SELECT factory_fee, factory_max_queue FROM server_config WHERE guild_id = ?",
+            "SELECT factory_fee, factory_max_queue, currency_emoji FROM server_config WHERE guild_id = ?",
             (interaction.guild_id,),
         )
         fee_rate = cfg["factory_fee"] if cfg else 0.0
+        currency_emoji = cfg["currency_emoji"] if cfg else None
         max_queue = cfg["factory_max_queue"] if cfg and cfg["factory_max_queue"] is not None else FACTORY_MAX_QUEUE_ITEMS
         user_queue_row = await self.db.fetchone(
             "SELECT COALESCE(SUM(quantity), 0) as queued_items FROM production_jobs WHERE guild_id = ? AND user_id = ? AND job_type = 'factory' AND status != 'complete'",
@@ -106,7 +109,7 @@ class FactoryCog(commands.Cog):
             balance = await self._get_server_balance(interaction.guild_id, interaction.user.id)
             if balance < fee_total:
                 await interaction.response.send_message(
-                    f"This would cost **{fee_total:.2f}** currency up front, but you only have **{balance:.2f}**.",
+                    f"This would cost {format_currency(fee_total, currency_emoji)} up front, but you only have {format_currency(balance, currency_emoji)}.",
                     ephemeral=True,
                 )
                 return
@@ -128,8 +131,8 @@ class FactoryCog(commands.Cog):
         )
         message = f"🏭 Queued {quantity}x **{recipe['name']}** for crafting."
         if fee_total > 0:
-            message += f"\n**{fee_total:.2f}** currency has been charged up front."
-        await interaction.response.send_message(message)
+            message += f"\n{format_currency(fee_total, currency_emoji)} has been charged up front."
+        await respond(interaction, self.db, content=message)
 
     def _build_available_products_lines(self, recipes: dict) -> list[str]:
         lines = []
@@ -147,13 +150,14 @@ class FactoryCog(commands.Cog):
 
     async def _factory_status_impl(self, interaction: discord.Interaction):
         cfg = await self.db.fetchone(
-            "SELECT factory_level, factory_fee, factory_fees_collected, factory_max_queue FROM server_config WHERE guild_id = ?",
+            "SELECT factory_level, factory_fee, factory_fees_collected, factory_max_queue, currency_emoji FROM server_config WHERE guild_id = ?",
             (interaction.guild_id,),
         )
         level = cfg["factory_level"] if cfg else 1
         fee_rate = cfg["factory_fee"] if cfg else 0.0
         max_queue = cfg["factory_max_queue"] if cfg and cfg["factory_max_queue"] is not None else FACTORY_MAX_QUEUE_ITEMS
         fees_collected = cfg["factory_fees_collected"] if cfg else 0.0
+        currency_emoji = cfg["currency_emoji"] if cfg else None
 
         rate = FACTORY_RATES.get(level, 15)
         next_level = level + 1
@@ -169,14 +173,14 @@ class FactoryCog(commands.Cog):
         embed.add_field(name="Level", value=f"**{level}**", inline=True)
         embed.add_field(name="Speed", value=f"**{rate}** items/hour", inline=True)
         embed.add_field(name="Queue Limit", value=f"**{max_queue}** items per user", inline=True)
-        embed.add_field(name="Fee", value=f"**{fee_rate:.2f}** per item", inline=True)
+        embed.add_field(name="Fee", value=f"{format_currency(fee_rate, currency_emoji)} per item", inline=True)
         embed.add_field(name="Pending", value=f"**{pending_items}** items across **{len(jobs)}** job(s)", inline=True)
 
         if upgrade_cost is not None:
             progress = min(fees_collected, upgrade_cost)
             embed.add_field(
                 name=f"Progress to Level {next_level}",
-                value=f"**{progress:.2f}** / **{upgrade_cost:.2f}** currency collected",
+                value=f"{format_currency(progress, currency_emoji)} / {format_currency(upgrade_cost, currency_emoji)} collected",
                 inline=False,
             )
         else:
@@ -196,7 +200,7 @@ class FactoryCog(commands.Cog):
 
         add_multi_field(embed, "Recipes", self._build_available_products_lines(CRAFTABLE))
 
-        await interaction.response.send_message(embed=embed)
+        await respond(interaction, self.db, embed=embed)
 
     @factory_group.command(name="status", description="Show factory level, queue, and upgrade progress")
     async def factory_status(self, interaction: discord.Interaction):
@@ -237,14 +241,7 @@ class FactoryCog(commands.Cog):
 
                 await self._adjust_quantity(job["user_id"], job["target_id"], produced)
 
-                if cfg["factory_fee"] > 0:
-                    fee_total = cfg["factory_fee"] * produced
-                    await self.db.execute(
-                        "UPDATE server_config SET factory_fees_collected = factory_fees_collected + ? WHERE guild_id = ?",
-                        (fee_total, cfg["guild_id"]),
-                    )
-                    await self._charge_user_fee(cfg["guild_id"], job["user_id"], fee_total)
-                    await self._maybe_upgrade_factory(cfg["guild_id"])
+                # (fee charging removed here - it happens in factory_craft, up front)
 
                 if new_quantity <= 0:
                     await self.db.execute(
@@ -267,6 +264,12 @@ class FactoryCog(commands.Cog):
         await self.db.execute(
             "UPDATE server_currency_balances SET balance = CASE WHEN balance >= ? THEN balance - ? ELSE 0.0 END WHERE guild_id = ? AND user_id = ?",
             (amount, amount, guild_id, user_id),
+        )
+        # Fees are a currency sink (docs/market.md section 1/4) - the amount
+        # leaves circulation entirely rather than moving to another balance.
+        await self.db.execute(
+            "UPDATE server_config SET currency_burned_total = currency_burned_total + ? WHERE guild_id = ?",
+            (amount, guild_id),
         )
 
     async def _maybe_upgrade_factory(self, guild_id: int):

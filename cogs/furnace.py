@@ -13,6 +13,8 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from utils.embeds import add_multi_field
+from utils.responses import respond
+from utils.formatting import format_currency
 
 from data.materials import (
     SMELTED_MATERIALS,
@@ -20,10 +22,20 @@ from data.materials import (
     FURNACE_RATES,
     FURNACE_FACTORY_UPGRADE_THRESHOLDS,
     get_material_info,
-    FURNACE_COAL_COST_PER_UNIT
+    FURNACE_COAL_COST_PER_UNIT,
+    target_stock,
 )
 
 PROCESS_TICK_MINUTES = 5
+
+# Discord snowflake IDs are always large positive integers, so 0 is safe to
+# reserve as a sentinel marking a production_jobs row as owned by the server
+# itself (the auto-smelt feature below) rather than a real user.
+SERVER_JOB_USER_ID = 0
+
+# Target ratio of iron:steel the server's auto-smelt steers its own stockpile
+# towards when both recipes draw from the same iron_ore supply.
+SERVER_IRON_TO_STEEL_RATIO = 4
 
 
 class FurnaceCog(commands.Cog):
@@ -61,6 +73,22 @@ class FurnaceCog(commands.Cog):
         )
         return row["balance"] if row else 0.0
 
+    async def _get_server_stock(self, guild_id: int, material_id: str) -> int:
+        row = await self.db.fetchone(
+            "SELECT quantity FROM server_material_storage WHERE guild_id = ? AND material_id = ?",
+            (guild_id, material_id),
+        )
+        return row["quantity"] if row else 0
+
+    async def _adjust_server_stock(self, guild_id: int, material_id: str, delta: int):
+        await self.db.execute(
+            """
+            INSERT INTO server_material_storage (guild_id, material_id, quantity) VALUES (?, ?, ?)
+            ON CONFLICT (guild_id, material_id) DO UPDATE SET quantity = quantity + excluded.quantity
+            """,
+            (guild_id, material_id, delta),
+        )
+
 
     @furnace_group.command(name="smelt", description="Queue raw materials to be smelted")
     @app_commands.describe(material="What to smelt", quantity="How many to produce")
@@ -87,10 +115,11 @@ class FurnaceCog(commands.Cog):
                 return
 
         cfg = await self.db.fetchone(
-            "SELECT furnace_fee, furnace_max_queue FROM server_config WHERE guild_id = ?",
+            "SELECT furnace_fee, furnace_max_queue, currency_emoji FROM server_config WHERE guild_id = ?",
             (interaction.guild_id,),
         )
         fee_rate = cfg["furnace_fee"] if cfg else 0.0
+        currency_emoji = cfg["currency_emoji"] if cfg else None
         max_queue = cfg["furnace_max_queue"] if cfg and cfg["furnace_max_queue"] is not None else FURNACE_MAX_QUEUE_ITEMS
         user_queue_row = await self.db.fetchone(
             "SELECT COALESCE(SUM(quantity), 0) as queued_items FROM production_jobs WHERE guild_id = ? AND user_id = ? AND job_type = 'furnace' AND status != 'complete'",
@@ -111,7 +140,7 @@ class FurnaceCog(commands.Cog):
             balance = await self._get_server_balance(interaction.guild_id, interaction.user.id)
             if balance < fee_total:
                 await interaction.response.send_message(
-                    f"This would cost **{fee_total:.2f}** currency up front, but you only have **{balance:.2f}**.",
+                    f"This would cost {format_currency(fee_total, currency_emoji)} up front, but you only have {format_currency(balance, currency_emoji)}.",
                     ephemeral=True,
                 )
                 return
@@ -134,8 +163,8 @@ class FurnaceCog(commands.Cog):
 
         message = f"🔥 Queued {quantity}x **{recipe['name']}** for smelting (burning {FURNACE_COAL_COST_PER_UNIT * quantity} extra coal to run the furnace)."
         if fee_total > 0:
-            message += f"\n**{fee_total:.2f}** currency has been charged up front."
-        await interaction.response.send_message(message)
+            message += f"\n{format_currency(fee_total, currency_emoji)} has been charged up front."
+        await respond(interaction, self.db, content=message)
 
     def _build_available_products_lines(self, recipes: dict) -> list[str]:
         lines = []
@@ -153,13 +182,14 @@ class FurnaceCog(commands.Cog):
 
     async def _furnace_status_impl(self, interaction: discord.Interaction):
         cfg = await self.db.fetchone(
-            "SELECT furnace_level, furnace_fee, furnace_fees_collected, furnace_max_queue FROM server_config WHERE guild_id = ?",
+            "SELECT furnace_level, furnace_fee, furnace_fees_collected, furnace_max_queue, currency_emoji FROM server_config WHERE guild_id = ?",
             (interaction.guild_id,),
         )
         level = cfg["furnace_level"] if cfg else 1
         fee_rate = cfg["furnace_fee"] if cfg else 0.0
         max_queue = cfg["furnace_max_queue"] if cfg and cfg["furnace_max_queue"] is not None else FURNACE_MAX_QUEUE_ITEMS
         fees_collected = cfg["furnace_fees_collected"] if cfg else 0.0
+        currency_emoji = cfg["currency_emoji"] if cfg else None
 
         rate = FURNACE_RATES.get(level, 15)
         next_level = level + 1
@@ -175,14 +205,14 @@ class FurnaceCog(commands.Cog):
         embed.add_field(name="Level", value=f"**{level}**", inline=True)
         embed.add_field(name="Speed", value=f"**{rate}** items/hour", inline=True)
         embed.add_field(name="Queue Limit", value=f"**{max_queue}** items per user", inline=True)
-        embed.add_field(name="Fee", value=f"**{fee_rate:.2f}** per item", inline=True)
+        embed.add_field(name="Fee", value=f"{format_currency(fee_rate, currency_emoji)} per item", inline=True)
         embed.add_field(name="Pending", value=f"**{pending_items}** items across **{len(jobs)}** job(s)", inline=True)
 
         if upgrade_cost is not None:
             progress = min(fees_collected, upgrade_cost)
             embed.add_field(
                 name=f"Progress to Level {next_level}",
-                value=f"**{progress:.2f}** / **{upgrade_cost:.2f}** currency collected",
+                value=f"{format_currency(progress, currency_emoji)} / {format_currency(upgrade_cost, currency_emoji)} collected",
                 inline=False,
             )
         else:
@@ -195,14 +225,15 @@ class FurnaceCog(commands.Cog):
                 emoji = info["emoji"] if info else "❓"
                 name = info["name"] if info else job["target_id"]
                 status_str = "In Progress" if job["status"] == "in_progress" else "Queued"
-                lines.append(f"{emoji} {job['quantity']}x {name} - {status_str}")
+                owner_str = " (🏛️ Server)" if job["user_id"] == SERVER_JOB_USER_ID else ""
+                lines.append(f"{emoji} {job['quantity']}x {name} - {status_str}{owner_str}")
             if len(jobs) > 10:
                 lines.append(f"... and {len(jobs) - 10} more")
             add_multi_field(embed, "Pending Jobs", lines)
 
         add_multi_field(embed, "Recipes", self._build_available_products_lines(SMELTED_MATERIALS))
 
-        await interaction.response.send_message(embed=embed)
+        await respond(interaction, self.db, embed=embed)
 
     @furnace_group.command(name="status", description="Show furnace level, queue, and upgrade progress")
     async def furnace_status(self, interaction: discord.Interaction):
@@ -229,13 +260,16 @@ class FurnaceCog(commands.Cog):
 
             remaining_capacity = produced_units
             while remaining_capacity > 0:
+                # Real users' jobs always process ahead of the server's own
+                # auto-smelt job (see _try_auto_smelt) so the server never
+                # hogs the furnace from the people actually playing.
                 job = await self.db.fetchone(
                     """
                     SELECT * FROM production_jobs
                     WHERE guild_id = ? AND job_type = 'furnace' AND status != 'complete'
-                    ORDER BY queued_at ASC LIMIT 1
+                    ORDER BY (user_id = ?) ASC, queued_at ASC LIMIT 1
                     """,
-                    (cfg["guild_id"],),
+                    (cfg["guild_id"], SERVER_JOB_USER_ID),
                 )
                 if job is None:
                     break  # no jobs waiting for this server
@@ -244,8 +278,12 @@ class FurnaceCog(commands.Cog):
                 new_quantity = job["quantity"] - produced
                 remaining_capacity -= produced
 
-                # Credit the produced items to the user.
-                await self._adjust_quantity(job["user_id"], job["target_id"], produced)
+                # Credit the produced items - to the server's own market
+                # storage for its auto-smelt jobs, otherwise to the user.
+                if job["user_id"] == SERVER_JOB_USER_ID:
+                    await self._adjust_server_stock(job["guild_id"], job["target_id"], produced)
+                else:
+                    await self._adjust_quantity(job["user_id"], job["target_id"], produced)
 
                 # (fee charging removed here — it now happens in furnace_smelt, up front)
 
@@ -260,6 +298,64 @@ class FurnaceCog(commands.Cog):
                         (new_quantity, job["job_id"]),
                     )
 
+            # If nothing at all is queued for this guild's furnace, let the
+            # server consider queuing its own auto-smelt job(s).
+            pending = await self.db.fetchone(
+                "SELECT 1 FROM production_jobs WHERE guild_id = ? AND job_type = 'furnace' AND status != 'complete' LIMIT 1",
+                (cfg["guild_id"],),
+            )
+            if pending is None:
+                await self._try_auto_smelt(cfg["guild_id"])
+
+    async def _try_auto_smelt(self, guild_id: int):
+        """Queues the server's own furnace job(s) against its own material
+        storage - only called when the furnace queue is completely empty.
+        Follows the normal recipe cost + coal tax, but skips the furnace fee
+        entirely (the server isn't paying itself). Only touches ore that's
+        above the market's target stock for that ore, so it never eats into
+        the reserve the /market buy price curve depends on."""
+        guild = self.bot.get_guild(guild_id)
+        if guild is None or not guild.member_count:
+            return
+        target = target_stock(guild.member_count)
+
+        coal_stock = await self._get_server_stock(guild_id, "coal")
+        jobs_to_queue: list[tuple[str, int, dict[str, int]]] = []
+
+        iron_ore_stock = await self._get_server_stock(guild_id, "iron_ore")
+        if iron_ore_stock >= target:
+            surplus = iron_ore_stock - target
+            iron_stock = await self._get_server_stock(guild_id, "iron")
+            steel_stock = await self._get_server_stock(guild_id, "steel")
+            # Steer the stockpile towards an iron:steel 4:1 ratio - produce
+            # whichever one is currently under-represented for that ratio.
+            recipe_id = "steel" if steel_stock < iron_stock / SERVER_IRON_TO_STEEL_RATIO else "iron"
+            recipe = SMELTED_MATERIALS[recipe_id]
+            ore_per_unit = recipe["inputs"]["iron_ore"]
+            coal_per_unit = recipe["inputs"].get("coal", 0) + FURNACE_COAL_COST_PER_UNIT
+            quantity = min(surplus // ore_per_unit, coal_stock // coal_per_unit)
+            if quantity > 0:
+                jobs_to_queue.append((recipe_id, quantity, {"iron_ore": ore_per_unit * quantity, "coal": coal_per_unit * quantity}))
+                coal_stock -= coal_per_unit * quantity
+
+        copper_ore_stock = await self._get_server_stock(guild_id, "copper_ore")
+        if copper_ore_stock >= target:
+            surplus = copper_ore_stock - target
+            recipe = SMELTED_MATERIALS["copper"]
+            ore_per_unit = recipe["inputs"]["copper_ore"]
+            coal_per_unit = FURNACE_COAL_COST_PER_UNIT
+            quantity = min(surplus // ore_per_unit, coal_stock // coal_per_unit)
+            if quantity > 0:
+                jobs_to_queue.append(("copper", quantity, {"copper_ore": ore_per_unit * quantity, "coal": coal_per_unit * quantity}))
+
+        for target_id, quantity, needs in jobs_to_queue:
+            for material_id, amount in needs.items():
+                await self._adjust_server_stock(guild_id, material_id, -amount)
+            await self.db.execute(
+                "INSERT INTO production_jobs (guild_id, user_id, job_type, target_id, quantity) VALUES (?, ?, 'furnace', ?, ?)",
+                (guild_id, SERVER_JOB_USER_ID, target_id, quantity),
+            )
+
     async def _charge_user_fee(self, guild_id: int, user_id: int, amount: float):
         if amount <= 0:
             return
@@ -270,6 +366,12 @@ class FurnaceCog(commands.Cog):
         await self.db.execute(
             "UPDATE server_currency_balances SET balance = CASE WHEN balance >= ? THEN balance - ? ELSE 0.0 END WHERE guild_id = ? AND user_id = ?",
             (amount, amount, guild_id, user_id),
+        )
+        # Fees are a currency sink (docs/market.md section 1/4) - the amount
+        # leaves circulation entirely rather than moving to another balance.
+        await self.db.execute(
+            "UPDATE server_config SET currency_burned_total = currency_burned_total + ? WHERE guild_id = ?",
+            (amount, guild_id),
         )
 
     async def _maybe_upgrade_furnace(self, guild_id: int):

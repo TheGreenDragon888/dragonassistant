@@ -51,10 +51,70 @@ class Database:
                 conn.execute(
                     "ALTER TABLE server_config ADD COLUMN factory_max_queue INTEGER NOT NULL DEFAULT 5"
                 )
+            if "public_messages" not in existing_columns:
+                conn.execute(
+                    "ALTER TABLE server_config ADD COLUMN public_messages INTEGER NOT NULL DEFAULT 0"
+                )
+            if "mining_pool_remaining" not in existing_columns:
+                conn.execute(
+                    "ALTER TABLE server_config ADD COLUMN mining_pool_remaining INTEGER NOT NULL DEFAULT 0"
+                )
+            if "mining_pool_last_topup" not in existing_columns:
+                conn.execute(
+                    "ALTER TABLE server_config ADD COLUMN mining_pool_last_topup TEXT NOT NULL DEFAULT ''"
+                )
+            if "currency_minted_total" not in existing_columns:
+                conn.execute(
+                    "ALTER TABLE server_config ADD COLUMN currency_minted_total REAL NOT NULL DEFAULT 0.0"
+                )
+            if "currency_burned_total" not in existing_columns:
+                conn.execute(
+                    "ALTER TABLE server_config ADD COLUMN currency_burned_total REAL NOT NULL DEFAULT 0.0"
+                )
 
+            # One-time backfill for the old default (5) - now unconditional so it
+            # doesn't clobber a server that intentionally set its queue to 5 via
+            # /setup max_queue on a later restart.
             conn.execute(
-                "UPDATE server_config SET furnace_max_queue = 25 WHERE furnace_max_queue IS NULL OR furnace_max_queue = 5"
+                "UPDATE server_config SET furnace_max_queue = 25 WHERE furnace_max_queue IS NULL"
             )
+
+            # Mining pool rebuild: fold any unharvested mining_blocks totals into
+            # the new per-server pool, then drop the old per-channel block tables.
+            table_names = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            if "mining_blocks" in table_names:
+                leftover_totals = conn.execute(
+                    "SELECT guild_id, SUM(remaining_total) AS total FROM mining_blocks GROUP BY guild_id"
+                ).fetchall()
+                for row in leftover_totals:
+                    conn.execute(
+                        "INSERT INTO server_config (guild_id, mining_pool_remaining) VALUES (?, ?) "
+                        "ON CONFLICT (guild_id) DO UPDATE SET mining_pool_remaining = mining_pool_remaining + excluded.mining_pool_remaining",
+                        (row["guild_id"], row["total"]),
+                    )
+                conn.execute("DROP TABLE IF EXISTS mining_block_contents")
+                conn.execute("DROP TABLE IF EXISTS mining_blocks")
+
+            # Market rebuild: the passive chat-activity payout is retired in
+            # favor of the market being the sole currency faucet (docs/market.md
+            # section 1) - its rolling window table is no longer needed.
+            if "chat_activity_window" in table_names:
+                conn.execute("DROP TABLE IF EXISTS chat_activity_window")
+
+            if "mine_channel_id" in existing_columns:
+                conn.execute("ALTER TABLE server_config DROP COLUMN mine_channel_id")
+
+            drill_columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(drills)").fetchall()
+            }
+            if "channel_id" in drill_columns:
+                conn.execute("ALTER TABLE drills DROP COLUMN channel_id")
 
     async def init_schema(self):
         """Creates all tables from schema.sql if they don't already exist.

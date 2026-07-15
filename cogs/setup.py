@@ -3,9 +3,10 @@ cogs/setup.py
 
 Implements the /setup command group, restricted to members with "Manage
 Server" permission, matching the design doc:
-  /setup mine                          - designate this channel as a dig site
   /setup currency <name> <emoji>       - configure this server's currency
   /setup fee <furnace|factory> <amt>   - set infrastructure usage fee
+  /setup max_queue <furnace|factory> <amt> - set per-user production queue cap
+  /setup messages <public|private>     - toggle whether bot responses are public
 
 A "cog" is discord.py's term for a self-contained module of commands/events
 that gets loaded into the bot at startup (see bot.py's load_extension calls).
@@ -14,6 +15,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.formatting import format_currency
+
 
 class SetupCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -21,7 +24,7 @@ class SetupCog(commands.Cog):
         self.db = bot.db  # the shared Database instance, attached in bot.py
 
     # A "group" bundles related slash commands under one parent, so users
-    # see them in Discord as /setup mine, /setup currency, /setup fee.
+    # see them in Discord as /setup currency, /setup fee, /setup messages.
     setup_group = app_commands.Group(
         name="setup", description="Server configuration (requires Manage Server permission)"
     )
@@ -33,16 +36,22 @@ class SetupCog(commands.Cog):
             (guild_id,),
         )
 
-    @setup_group.command(name="mine", description="Designate this channel as a mining dig site")
+    @setup_group.command(name="messages", description="Set whether the bot's responses are public or private in this server")
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def setup_mine(self, interaction: discord.Interaction):
+    @app_commands.describe(visibility="Public responses are visible to everyone; private ones only to the command's user")
+    @app_commands.choices(visibility=[
+        app_commands.Choice(name="public", value="public"),
+        app_commands.Choice(name="private", value="private"),
+    ])
+    async def setup_messages(self, interaction: discord.Interaction, visibility: app_commands.Choice[str]):
         await self._ensure_server_row(interaction.guild_id)
+        public_messages = 1 if visibility.value == "public" else 0
         await self.db.execute(
-            "UPDATE server_config SET mine_channel_id = ? WHERE guild_id = ?",
-            (interaction.channel_id, interaction.guild_id),
+            "UPDATE server_config SET public_messages = ? WHERE guild_id = ?",
+            (public_messages, interaction.guild_id),
         )
         await interaction.response.send_message(
-            f"✅ This channel is now the designated dig site for **{interaction.guild.name}**.",
+            f"✅ Bot responses in **{interaction.guild.name}** are now **{visibility.value}**.",
             ephemeral=True,
         )
 
@@ -77,8 +86,12 @@ class SetupCog(commands.Cog):
             f"UPDATE server_config SET {column} = ? WHERE guild_id = ?",
             (amount, interaction.guild_id),
         )
+        cfg = await self.db.fetchone(
+            "SELECT currency_emoji FROM server_config WHERE guild_id = ?", (interaction.guild_id,)
+        )
+        currency_emoji = cfg["currency_emoji"] if cfg else None
         await interaction.response.send_message(
-            f"✅ {infrastructure.value.title()} fee set to **{amount}** per item.",
+            f"✅ {infrastructure.value.title()} fee set to {format_currency(amount, currency_emoji)} per item.",
             ephemeral=True,
         )
 
@@ -101,7 +114,7 @@ class SetupCog(commands.Cog):
             ephemeral=True,
         )
 
-    @setup_mine.error
+    @setup_messages.error
     @setup_currency.error
     @setup_fee.error
     @setup_max_queue.error
